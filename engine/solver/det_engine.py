@@ -32,7 +32,7 @@ def _compute_encoder_transformer_grad_percentage(model: torch.nn.Module) -> floa
         val = grad.detach().abs().sum().item()
         total_l1 += val
         # Support both DDP ('module.') and non-DDP naming
-        if name.startswith('module.encoder.encoder'):
+        if name.startswith(('encoder.encoder', 'module.encoder.encoder')):
             enc_l1 += val
     if total_l1 <= 0.0 or not math.isfinite(total_l1):
         return 0.0

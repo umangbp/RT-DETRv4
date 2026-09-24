@@ -205,3 +205,25 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# ------------------------------------------------------------
+# RT-DETRv4 local training artifacts
+# ------------------------------------------------------------
+
+# Training outputs / checkpoints
+outputs/
+
+# Downloaded pretrained weights
+pretrain/
+
+# Local DINOv3 checkout and weights
+dinov3/
+
+# Model binaries
+*.pth
+*.pt
+*.onnx
+*.engine
+
+# Local environment snapshot
+environment-bootstrap-v1.txt

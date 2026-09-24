@@ -1,0 +1,28 @@
+task: detection
+
+evaluator:
+  type: CocoEvaluator
+  iou_types: ['bbox', ]
+
+# ShelfTicketAI has one detection class:
+#   1 = shelf_ticket
+num_classes: 1
+
+# Category IDs are already defined by our COCO export.
+remap_mscoco_category: False
+
+
+train_dataloader:
+  dataset:
+    type: CocoDetection
+    img_folder: /home/umangpatel/Data/Projects/work/ShelfTicketAI/dataset/bootstrap_v7/train/images
+    ann_file: /home/umangpatel/Data/Projects/work/ShelfTicketAI/dataset/bootstrap_v7/train/annotations.json
+    return_masks: False
+
+
+val_dataloader:
+  dataset:
+    type: CocoDetection
+    img_folder: /home/umangpatel/Data/Projects/work/ShelfTicketAI/dataset/bootstrap_v7/val/images
+    ann_file: /home/umangpatel/Data/Projects/work/ShelfTicketAI/dataset/bootstrap_v7/val/annotations.json
+    return_masks: False

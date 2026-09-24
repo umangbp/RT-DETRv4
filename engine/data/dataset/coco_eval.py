@@ -26,6 +26,13 @@ class CocoEvaluator(object):
         self.coco_gt : COCO = coco_gt
         self.iou_types = iou_types
 
+        # Model labels are contiguous [0..N-1], while custom COCO category
+        # IDs may be arbitrary (e.g. shelf_ticket has category_id=1).
+        self.label2category = {
+            label: category_id
+            for label, category_id in enumerate(sorted(self.coco_gt.getCatIds()))
+        }
+
         self.coco_eval = {}
         for iou_type in iou_types:
             self.coco_eval[iou_type] = COCOeval_faster(coco_gt, iouType=iou_type, print_function=print, separate_eval=True)
@@ -102,7 +109,7 @@ class CocoEvaluator(object):
                 [
                     {
                         "image_id": original_id,
-                        "category_id": labels[k],
+                        "category_id": self.label2category[labels[k]],
                         "bbox": box,
                         "score": scores[k],
                     }
