@@ -40,6 +40,9 @@ def main(args, ) -> None:
 
     cfg = YAMLConfig(args.config, **update_dict)
 
+    # Preserve the source training config for run provenance.
+    cfg.source_config_path = os.path.abspath(args.config)
+
     if args.resume or args.tuning:
         if 'HGNetv2' in cfg.yaml_cfg:
             cfg.yaml_cfg['HGNetv2']['pretrained'] = False

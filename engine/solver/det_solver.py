@@ -10,6 +10,10 @@ import time
 import json
 import datetime
 import math
+import hashlib
+import shutil
+import subprocess
+from pathlib import Path
 
 import torch
 
@@ -42,6 +46,60 @@ class DetSolver(BaseSolver):
 
         top1 = 0
         best_stat = {'epoch': -1, }
+        best_result = None
+        best_result_path = (
+            self.output_dir / "training_best.json"
+            if self.output_dir
+            else None
+        )
+
+        def record_best_result(
+            checkpoint_name,
+            epoch,
+            metric_name,
+            metric_value,
+        ):
+            nonlocal best_result
+
+            best_result = {
+                "checkpoint": checkpoint_name,
+                "epoch": int(epoch),
+                "metric_name": metric_name,
+                "metric_value": float(metric_value),
+                "weights": "ema" if self.ema else "model",
+            }
+
+            if (
+                best_result_path is not None
+                and dist_utils.is_main_process()
+            ):
+                with best_result_path.open(
+                    "w",
+                    encoding="utf-8",
+                ) as f:
+                    json.dump(
+                        best_result,
+                        f,
+                        indent=2,
+                        sort_keys=True,
+                    )
+                    f.write("\n")
+
+        # Restore exact best-checkpoint provenance when resuming.
+        if (
+            self.last_epoch > 0
+            and best_result_path is not None
+            and best_result_path.is_file()
+        ):
+            with best_result_path.open(
+                "r",
+                encoding="utf-8",
+            ) as f:
+                best_result = json.load(f)
+
+            # Restore the true global-best metric across resumes.
+            top1 = float(best_result["metric_value"])
+
         # evaluate again before resume training
         if self.last_epoch > 0:
             module = self.ema.module if self.ema else self.model
@@ -56,7 +114,16 @@ class DetSolver(BaseSolver):
             for k in test_stats:
                 best_stat['epoch'] = self.last_epoch
                 best_stat[k] = test_stats[k][0]
-                top1 = test_stats[k][0]
+
+                # Preserve the historical global best when resuming.
+                if best_result is None:
+                    top1 = test_stats[k][0]
+                else:
+                    top1 = max(
+                        top1,
+                        float(best_result["metric_value"]),
+                    )
+
                 print(f'best_stat: {best_stat}')
 
         best_stat_print = best_stat.copy()
@@ -174,11 +241,24 @@ class DetSolver(BaseSolver):
                 if best_stat[k] > top1:
                     best_stat_print['epoch'] = epoch
                     top1 = best_stat[k]
+
                     if self.output_dir:
                         if epoch >= self.train_dataloader.collate_fn.stop_epoch:
-                            dist_utils.save_on_master(self.state_dict(), self.output_dir / 'best_stg2.pth')
+                            checkpoint_name = 'best_stg2.pth'
                         else:
-                            dist_utils.save_on_master(self.state_dict(), self.output_dir / 'best_stg1.pth')
+                            checkpoint_name = 'best_stg1.pth'
+
+                        dist_utils.save_on_master(
+                            self.state_dict(),
+                            self.output_dir / checkpoint_name
+                        )
+
+                        record_best_result(
+                            checkpoint_name=checkpoint_name,
+                            epoch=epoch,
+                            metric_name=k,
+                            metric_value=top1,
+                        )
 
                 best_stat_print[k] = max(best_stat[k], top1)
                 print(f'best_stat: {best_stat_print}')  # global best
@@ -187,10 +267,34 @@ class DetSolver(BaseSolver):
                     if epoch >= self.train_dataloader.collate_fn.stop_epoch:
                         if test_stats[k][0] > top1:
                             top1 = test_stats[k][0]
-                            dist_utils.save_on_master(self.state_dict(), self.output_dir / 'best_stg2.pth')
+
+                            dist_utils.save_on_master(
+                                self.state_dict(),
+                                self.output_dir / 'best_stg2.pth'
+                            )
+
+                            record_best_result(
+                                checkpoint_name='best_stg2.pth',
+                                epoch=epoch,
+                                metric_name=k,
+                                metric_value=top1,
+                            )
                     else:
+                        previous_top1 = top1
                         top1 = max(test_stats[k][0], top1)
-                        dist_utils.save_on_master(self.state_dict(), self.output_dir / 'best_stg1.pth')
+
+                        dist_utils.save_on_master(
+                            self.state_dict(),
+                            self.output_dir / 'best_stg1.pth'
+                        )
+
+                        if test_stats[k][0] >= previous_top1:
+                            record_best_result(
+                                checkpoint_name='best_stg1.pth',
+                                epoch=epoch,
+                                metric_name=k,
+                                metric_value=top1,
+                            )
 
                 elif epoch >= self.train_dataloader.collate_fn.stop_epoch:
                     best_stat = {'epoch': -1, }
@@ -220,6 +324,106 @@ class DetSolver(BaseSolver):
                         for name in filenames:
                             torch.save(coco_evaluator.coco_eval["bbox"].eval,
                                     self.output_dir / "eval" / name)
+
+        if (
+            self.output_dir
+            and dist_utils.is_main_process()
+            and best_result is not None
+        ):
+            source_config = Path(self.cfg.source_config_path)
+            config_snapshot = self.output_dir / "training_config.yml"
+
+            shutil.copy2(
+                source_config,
+                config_snapshot,
+            )
+
+            def sha256_file(path):
+                digest = hashlib.sha256()
+
+                with open(path, "rb") as f:
+                    for chunk in iter(
+                        lambda: f.read(1024 * 1024),
+                        b"",
+                    ):
+                        digest.update(chunk)
+
+                return digest.hexdigest()
+
+            checkpoint_path = (
+                self.output_dir
+                / best_result["checkpoint"]
+            )
+
+            if not checkpoint_path.is_file():
+                raise RuntimeError(
+                    "Best checkpoint recorded by training does not exist: "
+                    f"{checkpoint_path}"
+                )
+
+            try:
+                git_commit = subprocess.check_output(
+                    ["git", "rev-parse", "HEAD"],
+                    text=True,
+                ).strip()
+            except Exception:
+                git_commit = None
+
+            try:
+                git_dirty = bool(
+                    subprocess.check_output(
+                        ["git", "status", "--porcelain"],
+                        text=True,
+                    ).strip()
+                )
+            except Exception:
+                git_dirty = None
+
+            result = {
+                "schema_version": 1,
+                "status": "completed",
+                "source": {
+                    "git_commit": git_commit,
+                    "git_dirty": git_dirty,
+                },
+                "config": {
+                    "file": "training_config.yml",
+                    "sha256": sha256_file(config_snapshot),
+                },
+                "result": {
+                    "checkpoint": best_result["checkpoint"],
+                    "checkpoint_sha256": sha256_file(
+                        checkpoint_path
+                    ),
+                    "epoch": best_result["epoch"],
+                    "metric": {
+                        "name": best_result["metric_name"],
+                        "value": best_result["metric_value"],
+                    },
+                    "weights": best_result["weights"],
+                },
+            }
+
+            result_path = (
+                self.output_dir
+                / "training_result.json"
+            )
+
+            with result_path.open(
+                "w",
+                encoding="utf-8",
+            ) as f:
+                json.dump(
+                    result,
+                    f,
+                    indent=2,
+                    sort_keys=True,
+                )
+                f.write("\n")
+
+            print(
+                f"Training result written to {result_path}"
+            )
 
         total_time = time.time() - start_time
         total_time_str = str(datetime.timedelta(seconds=int(total_time)))
