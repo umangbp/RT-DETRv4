@@ -15,6 +15,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import yaml
 import torch
 
 from ..misc import dist_utils, stats
@@ -338,6 +339,26 @@ class DetSolver(BaseSolver):
                 config_snapshot,
             )
 
+            # Store the fully resolved effective YAML configuration.
+            # YAMLConfig.yaml_cfg already contains recursively merged
+            # __include__ files plus CLI overrides.
+            resolved_config = (
+                self.output_dir / "resolved_config.yml"
+            )
+
+            resolved_cfg = dict(self.cfg.yaml_cfg)
+            resolved_cfg.pop("__include__", None)
+
+            with resolved_config.open(
+                "w",
+                encoding="utf-8",
+            ) as f:
+                yaml.safe_dump(
+                    resolved_cfg,
+                    f,
+                    sort_keys=False,
+                )
+
             def sha256_file(path):
                 digest = hashlib.sha256()
 
@@ -389,6 +410,10 @@ class DetSolver(BaseSolver):
                 "config": {
                     "file": "training_config.yml",
                     "sha256": sha256_file(config_snapshot),
+                    "resolved_file": "resolved_config.yml",
+                    "resolved_sha256": sha256_file(
+                        resolved_config
+                    ),
                 },
                 "result": {
                     "checkpoint": best_result["checkpoint"],
